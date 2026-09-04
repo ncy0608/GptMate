@@ -14,6 +14,7 @@ for arch in arm64 x86_64; do
   cp "$BUILD_DIR/gptmate-$arch" "$APP_DIR/Contents/MacOS/gptmate"
   cp "$PROJECT_DIR/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
   cp "$PROJECT_DIR/Resources/GptMateIcon.icns" "$APP_DIR/Contents/Resources/"
+  cp "$PROJECT_DIR/LICENSE" "$APP_DIR/Contents/Resources/LICENSE"
   plutil -lint "$APP_DIR/Contents/Info.plist"
   codesign --force --sign - "$APP_DIR"
   codesign --verify --deep --strict "$APP_DIR"
