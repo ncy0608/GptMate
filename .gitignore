@@ -1,0 +1,9 @@
+.DS_Store
+.build/
+dist/
+*.app/
+*.dSYM/
+*.log
+.env
+.env.*
+!.env.example
