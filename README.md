@@ -2,7 +2,7 @@
 
 <img src="Resources/GptMateIcon.png" width="128" alt="GptMate icon">
 
-一个轻量的 macOS 菜单栏工具，用于查看 Codex 剩余额度、运行任务和任务结束提醒。
+一个轻量的 macOS 菜单栏和 Windows 11 系统托盘工具，用于查看 Codex 剩余额度、运行任务和任务结束提醒。
 
 这是个人开发的非官方项目，与 OpenAI 无隶属关系。
 
@@ -16,7 +16,9 @@
 - 连接进程退出后尝试重连，支持手动刷新、重连和退出。
 - 在任务退出运行列表时发送系统通知；需要用户允许通知。
 
-## 系统要求
+## macOS 版
+
+### 系统要求
 
 - macOS 13 或更新版本。
 - 本机安装并登录可用的 Codex 环境。应用通过本机 `codex app-server --stdio` 获取数据。
@@ -24,7 +26,7 @@
 
 应用会检查 ChatGPT/Codex 应用包内的 CLI，以及 Homebrew、`~/.local/bin`、`~/.cargo/bin` 等常见安装位置。
 
-## 从源码构建
+### 从源码构建
 
 在仓库根目录执行：
 
@@ -43,6 +45,25 @@ bash scripts/package.sh
 发布时提供 `GptMate-v0.2.1-macOS-Intel-x86_64.zip` 和 `GptMate-v0.2.1-macOS-AppleSilicon-arm64.zip` 两个下载包，分别对应 Intel 和 M 系列芯片。每个压缩包附带独立的 `.sha256` 校验文件。
 
 构建产物使用本地 ad-hoc 签名，尚未完成 Apple Developer ID 签名和公证。下载的应用可能受到 macOS 安全验证限制；有疑虑时可检查源码并自行构建。本项目不提供关闭系统安全检查的脚本。
+
+## Windows 11 版
+
+Windows 版位于 `Windows/`，使用 C#、.NET 8 和 Windows Forms，不依赖第三方 UI 组件。
+
+- 支持 64 位 Windows 11，分别提供 x64 和 ARM64 版本。
+- 点击系统托盘额度圆环打开状态窗口；右键可刷新、重连或退出。
+- 自动寻找 `%APPDATA%\\npm\\codex.cmd`、常见 Codex/ChatGPT 安装目录及 `PATH` 中的 Codex CLI。
+- 发布包为自包含单文件程序，无需预装 .NET 运行时。
+
+在 Windows 11 中安装 .NET 8 SDK 后，从仓库根目录运行：
+
+```powershell
+./Windows/package.ps1
+```
+
+生成 `GptMate-v0.3.0-Windows-x64.zip` 和 `GptMate-v0.3.0-Windows-ARM64.zip`，以及对应的 SHA-256 校验文件。GitHub Actions 也会在 Windows 环境自动构建这四个文件。
+
+首次 Windows 预览包尚未进行 Microsoft 代码签名，SmartScreen 可能显示未知发布者。源码与自动构建流程均已公开，可核对校验值或自行构建。
 
 ## 使用与隐私
 
@@ -65,9 +86,10 @@ bash scripts/package.sh
 ## 项目结构
 
 ```text
-Sources/       SwiftUI/AppKit 界面、状态模型、CLI 通信和日志检查
+Sources/       macOS SwiftUI/AppKit 界面、状态模型、CLI 通信和日志检查
 Resources/     Info.plist 与应用图标
 scripts/       Intel / M 系列独立构建与打包脚本
+Windows/       Windows Forms 托盘程序、资源和双架构打包脚本
 docs/          图标设计说明与预览版发布说明
 ```
 

@@ -1,0 +1,32 @@
+name: Build Windows
+
+on:
+  push:
+    paths:
+      - "Windows/**"
+      - ".github/workflows/windows-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Build and package x64 and ARM64
+        shell: pwsh
+        run: ./Windows/package.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GptMate-Windows-v0.3.0
+          path: |
+            dist/GptMate-v0.3.0-Windows-x64.zip
+            dist/GptMate-v0.3.0-Windows-x64.zip.sha256
+            dist/GptMate-v0.3.0-Windows-ARM64.zip
+            dist/GptMate-v0.3.0-Windows-ARM64.zip.sha256
+          if-no-files-found: error
