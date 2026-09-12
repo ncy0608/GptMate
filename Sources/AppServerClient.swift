@@ -14,6 +14,9 @@ final class CodexAppServerClient {
     private var requests: [Int: String] = [:]
     private var planSteps: [String: [PlanStep]] = [:]
     private var shouldRestart = true
+    private var initialized = false
+    private var taskEnds = TaskEndTracker()
+    private let logCache = SessionLogCache()
 
     func start() {
         shouldRestart = true
@@ -33,14 +36,14 @@ final class CodexAppServerClient {
         }
     }
 
-    func refresh() {
+    func refresh(includeQuota: Bool = true) {
         queue.async { [weak self] in
             guard let self else { return }
             guard self.process?.isRunning == true else {
                 self.launch()
                 return
             }
-            self.requestSnapshot()
+            self.requestSnapshot(includeQuota: includeQuota)
         }
     }
 
@@ -70,7 +73,10 @@ final class CodexAppServerClient {
         stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
-            self?.queue.async { self?.consume(data) }
+            self?.queue.async {
+                guard let self, self.process === process else { return }
+                self.consume(data)
+            }
         }
         stderrPipe.fileHandleForReading.readabilityHandler = { handle in
             _ = handle.availableData
@@ -104,7 +110,7 @@ final class CodexAppServerClient {
                     "clientInfo": [
                         "name": "codex-meter",
                         "title": "GptMate",
-                        "version": "0.2.0",
+                        "version": "0.3.0",
                     ],
                     "capabilities": ["experimentalApi": true],
                 ]
@@ -127,6 +133,7 @@ final class CodexAppServerClient {
     private func clearProcessReferences() {
         output?.readabilityHandler = nil
         errorOutput?.readabilityHandler = nil
+        initialized = false
         process = nil
         input = nil
         output = nil
@@ -146,8 +153,18 @@ final class CodexAppServerClient {
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
-    private func requestSnapshot() {
+    func refreshQuota() {
+        queue.async { [weak self] in self?.requestQuota() }
+    }
+
+    private func requestQuota() {
+        guard initialized else { return }
         sendRequest(method: "account/rateLimits/read", params: nil)
+    }
+
+    private func requestSnapshot(includeQuota: Bool = true) {
+        guard initialized else { return }
+        if includeQuota { requestQuota() }
         sendRequest(
             method: "thread/list",
             params: ["limit": 50, "sortKey": "updated_at"]
@@ -155,6 +172,7 @@ final class CodexAppServerClient {
     }
 
     private func sendRequest(method: String, params: Any?) {
+        guard !requests.values.contains(method) else { return }
         let id = nextRequestID
         nextRequestID += 1
         requests[id] = method
@@ -162,6 +180,17 @@ final class CodexAppServerClient {
         var message: [String: Any] = ["id": id, "method": method]
         if let params { message["params"] = params }
         send(message)
+        queue.asyncAfter(deadline: .now() + 20) { [weak self, weak source = process] in
+            guard let self, let source, self.process === source, self.requests[id] != nil else { return }
+            self.requests.removeValue(forKey: id)
+            if method == "initialize" {
+                self.onConnectionChange?(false, "连接超时，正在重新连接…")
+                self.stopProcess()
+                if self.shouldRestart { self.launch() }
+            } else {
+                self.reportReadFailure(method)
+            }
+        }
     }
 
     private func send(_ message: [String: Any]) {
@@ -195,16 +224,20 @@ final class CodexAppServerClient {
     private func handle(_ message: [String: Any]) {
         if let id = (message["id"] as? NSNumber)?.intValue,
            let method = requests.removeValue(forKey: id) {
-            let result = message["result"] as? [String: Any]
+            guard message["error"] == nil, let result = message["result"] as? [String: Any] else {
+                reportReadFailure(method)
+                return
+            }
             switch method {
             case "initialize":
+                initialized = true
                 send(["method": "initialized"])
                 onConnectionChange?(true, "已连接 Codex")
                 requestSnapshot()
             case "account/rateLimits/read":
-                parseRateLimits(result)
+                if !parseRateLimits(result) { reportReadFailure(method) }
             case "thread/list":
-                parseThreads(result)
+                if !parseThreads(result) { reportReadFailure(method) }
             default:
                 break
             }
@@ -217,48 +250,48 @@ final class CodexAppServerClient {
         }
         switch method {
         case "account/rateLimits/updated":
-            parseRateLimits(params)
+            requestQuota()
+        case "account/updated":
+            requestSnapshot()
         case "turn/plan/updated":
             parsePlan(params)
-        case "thread/status/changed", "thread/started", "turn/completed":
-            requestSnapshot()
+        case "turn/completed":
+            if let threadID = params["threadId"] as? String,
+               let turn = params["turn"] as? [String: Any],
+               let turnID = turn["id"] as? String,
+               let status = turn["status"] as? String, status != "inProgress" {
+                let outcome = TaskOutcome.from(status: status)
+                if let title = taskEnds.finish(id: threadID, turnID: turnID) {
+                    onMessage?(.taskEnded(title: title, outcome: outcome))
+                }
+            }
+            requestSnapshot(includeQuota: false)
+        case "thread/status/changed", "thread/started":
+            requestSnapshot(includeQuota: false)
         default:
             break
         }
     }
 
-    private func parseRateLimits(_ container: [String: Any]?) {
-        guard let container else { return }
-        var snapshot = container["rateLimits"] as? [String: Any]
-        if snapshot == nil,
-           let buckets = container["rateLimitsByLimitId"] as? [String: Any] {
-            snapshot = buckets["codex"] as? [String: Any]
+    private func reportReadFailure(_ method: String) {
+        switch method {
+        case "account/rateLimits/read": onMessage?(.quotaReadFailed)
+        case "thread/list": onMessage?(.tasksReadFailed)
+        default: onConnectionChange?(false, "连接失败，请检查 Codex 登录状态或重连")
         }
-        guard let snapshot else { return }
-
-        let primary = parseWindow(snapshot["primary"])
-        let secondary = parseWindow(snapshot["secondary"])
-        onMessage?(.rateLimits(primary: primary, secondary: secondary))
     }
 
-    private func parseWindow(_ value: Any?) -> RateLimitWindow? {
-        guard let dictionary = value as? [String: Any],
-              let used = dictionary["usedPercent"] as? NSNumber else {
-            return nil
-        }
-        let duration = (dictionary["windowDurationMins"] as? NSNumber)?.intValue
-        let resetTimestamp = (dictionary["resetsAt"] as? NSNumber)?.doubleValue
-        return RateLimitWindow(
-            usedPercent: used.doubleValue,
-            windowDurationMins: duration,
-            resetsAt: resetTimestamp.map(Date.init(timeIntervalSince1970:))
-        )
+    private func parseRateLimits(_ container: [String: Any]?) -> Bool {
+        guard let container, let snapshot = RateLimitSnapshot.parse(container) else { return false }
+        onMessage?(.rateLimits(snapshot))
+        return true
     }
 
-    private func parseThreads(_ result: [String: Any]?) {
-        guard let threads = result?["data"] as? [[String: Any]] else { return }
+    private func parseThreads(_ result: [String: Any]?) -> Bool {
+        guard let threads = result?["data"] as? [[String: Any]] else { return false }
         var tasks: [ActiveTask] = []
 
+        var inspected = Set<String>()
         for thread in threads.prefix(20) {
             guard let id = thread["id"] as? String else { continue }
             let name = (thread["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -270,18 +303,38 @@ final class CodexAppServerClient {
 
             let status = thread["status"] as? [String: Any]
             let statusType = status?["type"] as? String
-            let logState = (thread["path"] as? String).flatMap(SessionLogInspector.inspect)
-            let isActive = statusType == "active" || logState?.active == true
+            let path = thread["path"] as? String
+            let logState = path.flatMap { logCache.inspect(path: $0) }
+            inspected.insert(id)
+            let isActive = logState?.active ?? (statusType == "active")
+            if let outcome = taskEnds.observe(id: id, title: title, path: path, state: logState, active: isActive) {
+                onMessage?(.taskEnded(title: title, outcome: outcome))
+            }
             guard isActive else { continue }
 
             var steps = planSteps[id] ?? []
             if steps.isEmpty, let activity = logState?.activity {
                 steps = [PlanStep(step: activity, status: "inProgress")]
             }
-            tasks.append(ActiveTask(threadID: id, title: title, steps: steps))
+            let activity = TaskActivity.resolve(status: status, logActivity: logState?.activityKind ?? .running)
+            tasks.append(ActiveTask(threadID: id, title: title, steps: steps,
+                                    activityKind: activity, startedAt: logState?.startedAt))
         }
 
-        onMessage?(.activeTasks(tasks))
+        // A task outside the recent list is only ended after checking its known log.
+        for (id, running) in taskEnds.running where !inspected.contains(id) {
+            guard let path = running.path, let state = logCache.inspect(path: path) else { continue }
+            if let outcome = taskEnds.observe(id: id, title: running.title, path: path, state: state, active: state.active) {
+                onMessage?(.taskEnded(title: running.title, outcome: outcome))
+            } else if state.active {
+                tasks.append(ActiveTask(threadID: id, title: running.title, steps: [],
+                                        activityKind: state.activityKind, startedAt: state.startedAt))
+            }
+        }
+        let recentPaths = threads.prefix(20).compactMap { $0["path"] as? String }
+        logCache.retain(paths: Set(recentPaths + taskEnds.running.values.compactMap(\.path)))
+        onMessage?(.activeTasks(ActiveTask.prioritizingAttention(tasks)))
+        return true
     }
 
     private func parsePlan(_ params: [String: Any]) {
